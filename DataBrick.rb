@@ -29,21 +29,28 @@ class DataBrick
       
       # make a getter method!
       define_method(name) do
-        @source.seek @position + offset_for(name)
-        send("read_#{type}", @source, options)
+        begin; was_at = @source.tell
+          @source.seek @position + offset_for(name)
+          send("read_#{type}", @source, options)
+        ensure; @source.seek was_at; end
       end
       
       # and a setter would be great too!
       case type.to_sym # Numbers always take the same number of bytes, so we can update them smartly!
       when :raw_string # for variable width things...
         define_method("#{name}=") do |value|
-          @source.seek @position
-          update({name => value}, @source);
+          begin; was_at = @source.tell
+            @source.seek @position
+            update({name => value}, @source);
+          ensure; @source.seek was_at; end
         end
       else
         define_method("#{name}=") do |value|
-          @source.seek @position + offset_for(name)
-          @source.write self.class.send("blob_#{type}", value, {}, options)
+          begin; was_at = @source.tell
+            @source.seek @position + offset_for(name)
+            @source.write self.class.send("blob_#{type}", value, {}, options)
+            @source.flush
+          ensure; @source.seek was_at; end
         end
       end
       
@@ -58,6 +65,7 @@ class DataBrick
       @parts.each_with_index do |part, i|
         write_to << send("blob_#{@part_types[i]}", properties[part], properties, @part_opts[i])
       end
+      write_to.flush if write_to.respond_to?(:flush)
       return write_to.respond_to?(:seek) ? self.new(write_to, original_position) : write_to
     end
   end
@@ -73,6 +81,7 @@ class DataBrick
     raise 'Length of brick is longer! cannot safely update without overflowing! Aborting!' if length < blob.length
     @source.seek @position
     @source.write updated
+    @source.flush
   end
   
   # returns the byte length of this block serialized
