@@ -35,15 +35,15 @@ class DataBrick
       
       # and a setter would be great too!
       case type.to_sym # Numbers always take the same number of bytes, so we can update them smartly!
-      when :integer, :pointer
-        define_method("#{name}=") do |value|
-          @source.seek @position + offset_for(name)
-          @source.write self.class.send("blob_#{type}", value, {}, options)
-        end
-      else # do things the old fashioned way otherwise, slow and steady wins this uncorruptable race!
+      when :raw_string # for variable width things...
         define_method("#{name}=") do |value|
           @source.seek @position
           update({name => value}, @source);
+        end
+      else
+        define_method("#{name}=") do |value|
+          @source.seek @position + offset_for(name)
+          @source.write self.class.send("blob_#{type}", value, {}, options)
         end
       end
       
@@ -175,11 +175,14 @@ end
 # 
 # last = false; # make this variable stay out here so it lasts forever!
 # people.each_with_index do |person, index|
+#   # go to end of file to add new CatPeople without overwriting any!
+#   database.seek 0, File::SEEK_END
+#   # add it right there
 #   cat = CatPeople.create({
 #           :friend => person,
 #           :cat => pets[index]
 #         }, database)
-#   # link it up in to a list!
+#   # link it up in to a list. :)
 #   last.next = cat if last
 #   last = cat
 # end
@@ -200,10 +203,5 @@ end
 # @ An Array type?
 # @ Booleans type! (length = bools / 8)
 # 
-
-
-
-
-
 
 

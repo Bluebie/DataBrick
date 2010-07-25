@@ -15,7 +15,7 @@ database.sync = true
 
 last = false; # make this variable stay out here so it lasts forever!
 people.each_with_index do |person, index|
-  database.seek 0, File::SEEK_END # go to end of file to add new catperson
+  database.seek 0, File::SEEK_END
   cat = CatPeople.create({
           :friend => person,
           :cat => pets[index]
