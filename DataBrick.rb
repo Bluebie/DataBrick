@@ -109,7 +109,9 @@ class DataBrick
   
   # returns a stringy representation of this DataBrick's unique content
   def inspect
-    "<#{self.class.name}##{position}: #{parts.map {|p| val = self.send(p); ".#{p}: #{val.is_a?(DataBrick) ? val.micro_inspect : val.inspect}" }.join(', ')}>"
+    "<#{self.class.name}##{position}: #{parts.map {|p|
+        val = self.send(p); ".#{p}: #{val.is_a?(DataBrick) ? val.micro_inspect : val.inspect}"
+    }.join(', ')}>"
   end
   
   def micro_inspect; "<#{self.class.name}##{position}>"; end
@@ -119,25 +121,34 @@ class DataBrick
   PointerDefaults = {:bits => 32, :nil_if => 0xFFFFFFFF}
   
   # defines a simple string - defaults 8 bit length, :bits => 16 or 32 for longer strings!
-  def self.define_one_string(name, opts = {})
+  def self.define_one_string(name, opts)
     define_piece "#{name}_length", :string_length, {:string_name => name}.merge(opts)
     define_piece name,             :raw_string,    {:length_from => "#{name}_length".to_sym}.merge(opts)
   end
   
+  # shortcut to raw string (fixed sounds nicer than raw, I think?)
+  def self.define_one_fixed_string(name, opts)
+    define_piece name, :raw_string, opts
+  end
+  
   # Thing readers!
   IntPacker = {8 => 'C', 16 => 'n', 32 => 'N', 64 => 'Q'}
-  def read_integer(io, options = {}); options = {:bits => 8}.merge(options)
+  def read_integer(io, options); options = {:bits => 8}.merge(options)
     source.read(options[:bits] / 8).unpack(IntPacker[options[:bits]]).first
   end
   
-  def read_raw_string(io, options = {}); io.read(send(options[:length_from])); end
+  def read_raw_string(io, options); io.read(options[:length] || send(options[:length_from])); end
   alias_method :read_string_length, :read_integer
   
-  def read_pointer(io, options = {})
+  def read_pointer(io, options)
     options = PointerDefaults.merge(options)
     ref = read_integer(io, options)
     return nil if ref == options[:nil_if]
     (options[:type] || self.class).new(io, ref)
+  end
+  
+  def read_array(io, options)
+    FixedArray.new(io, options, self)
   end
   
   
@@ -147,7 +158,8 @@ class DataBrick
   end
   
   def self.blob_raw_string(str, props, options = {})
-    str.to_s
+    if options[:length] then (str.to_s + ("\000" * options[:length]))[0 ... options[:length]]
+    else str.to_s end
   end
   
   def self.blob_pointer(pointee, props, options = {})
@@ -161,12 +173,58 @@ class DataBrick
     self.blob_integer(props[options[:string_name]].to_s.length, props, options)
   end
   
+  def self.blob_array(arr, props, options = {})
+    accumulate = ''; options[:length].times do |i|
+      accumulate += send("blob_#{options[:innards]}", arr[i], props, options[:innards_options]).to_s
+    end; return accumulate
+  end
+  
   # lengths for offset calculation
   def type_length_integer(opts); (opts[:bits] || 8) / 8; end
   def type_length_pointer(opts); (opts[:bits] || 32) / 8; end
-  def type_length_raw_string(opts); send(opts[:length_from]); end
+  def type_length_raw_string(opts); opts[:length] || send(opts[:length_from]); end
   alias_method :type_length_string_length, :type_length_integer
+  def type_length_array(opts)
+    (opts[:length] || send(opts[:length_from])) * send("type_length_#{opts[:innards]}", opts[:innards_options] || {})
+  end
+end
+
+class DataBrick::FixedArray
+  def initialize(io, options, parent); @io = io; @start = io.tell; @options = options; @parent = parent; end
+  attr_reader :io, :start, :options
+  include Enumerable
   
+  # get a part of the array. :)
+  def [] key
+    was_at = @io.tell; seek_to key
+    return @parent.send("read_#{@options[:innards]}", @io, @options[:innards_options] || {})
+  ensure @io.seek was_at end
+  
+  # set a part of the array. :)
+  def []= key, value
+    was_at = @source.tell
+    seek_to key
+    @io.write @parent.class.send("blob_#{@options[:innards]}", value, {}, @options[:innards_options] || {})
+  ensure @io.seek was_at end
+  
+  # Implementing #each makes Enumerable happy!
+  def each &blk
+    (0 ... length).each { |index| blk.call(self[index]) }
+  end
+  
+  def size; @options[:length] || @options[:length_from]; end
+  alias_method :length, :size
+  
+  def inspect; "<#{self.class.name}:#{@start}*#{length}>"; end
+  
+  protected
+  def seek_to key
+    raise 'Key must be an integer.' unless key.is_a?(Integer)
+    raise 'Index must not be negative.' if key < 0
+    raise 'Key must be less than length.' if key >= length
+    chunk_size = @parent.send("type_length_#{@options[:innards]}", @options[:innards_options] || {})
+    @io.seek @start + (chunk_size * key)
+  end
 end
 
 #             -=- BrickFu Lessons! -=-
@@ -205,11 +263,16 @@ end
 #   catman = catman.next
 # end until catman == nil
 #
+#### Notes:
+# Arrays can only currently contain statically lengthed things,
+# numbers, pointers, and fixed_strings are great examples.
+# If you want to see how more of the types work, look in the
+# test.rb file at how it does it. :)
+#
 
 #### TODO:
 # @ Add float types
 # @ Maybe something for signed numbers?
-# @ An Array type?
 # @ Booleans type! (length = bools / 8)
 # 
 

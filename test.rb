@@ -32,3 +32,18 @@ until catman == nil
   catman = catman.next
 end
 
+File.unlink('cats.db')
+#### TEST ARRAYS!
+
+class ArrThing < DataBrick
+  define_piece :words, :array, :innards => :raw_string, :innards_options => {:length => 4}, :length => 10
+end
+
+file = open('arr-thing.db', 'w+')
+thing = ArrThing.create({
+  :words => ['cats', 'bats', 'cake', 'macs', 'chat', 'wave', 'four', 'tofu', 'echo', 'flop']
+}, file)
+
+puts "\nThese are a few of my favourite things:"
+thing.words.each { |word| puts word }
+file.close
