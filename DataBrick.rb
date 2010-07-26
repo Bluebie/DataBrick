@@ -205,6 +205,7 @@ class DataBrick::FixedArray
     was_at = @source.tell
     seek_to key
     @io.write @parent.class.send("blob_#{@options[:innards]}", value, {}, @options[:innards_options] || {})
+    @io.flush
   ensure @io.seek was_at end
   
   # Implementing #each makes Enumerable happy!
