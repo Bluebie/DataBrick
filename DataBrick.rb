@@ -41,14 +41,19 @@ class DataBrick
         define_method("#{name}=") do |value|
           begin; was_at = @source.tell
             @source.seek @position
-            update({name => value}, @source);
+            update({name => value});
           ensure; @source.seek was_at; end
         end
       else
         define_method("#{name}=") do |value|
           begin; was_at = @source.tell
             @source.seek @position + offset_for(name)
-            @source.write self.class.send("blob_#{type}", value, {}, options)
+            @source.write(blobbed = self.class.send("blob_#{type}", value, {}, options))
+            if blobbed.bytesize != send("length_for_#{name}")
+              # refresh these silly bits because lengths are all wonky!
+              part_list = self.parts; next_parts = part_list[part_list.index(name) ... part_list.size]
+              next_parts.each { |nname| self.send("#{nname}=", self.send(nname)) }
+            end
             @source.flush
           ensure; @source.seek was_at; end
         end
@@ -77,21 +82,25 @@ class DataBrick
   end
   
   def update properties
+    was_at = @source.tell
     blob = self.class.create(to_h.merge(properties))
-    raise 'Length of brick is longer! cannot safely update without overflowing! Aborting!' if length < blob.length
+    #raise 'Length of brick is longer! cannot safely update without overflowing! Aborting!' if length < blob.length
     @source.seek @position
-    @source.write updated
+    @source.write blob
     @source.flush
-  end
+  ensure; @source.seek was_at; end
+  alias_method :merge!, :update
   
   # returns the byte length of this block serialized
   def length; parts.inject(0) { |sofar, part| sofar + send("length_for_#{part}") }; end
   
-  # add all the lengths for the bits before the specified one, to figure out the byte offset
-  def offset_for(part)
-    parts[0 ... parts.index(part)].inject(0) do |sofar, piece|
-      sofar + self.send("length_for_#{piece}")
-    end
+  # get the start position of a defined piece, considering any variable length bits
+  def offset_for(part); parts[0...parts.index(part)].inject(0) { |sofar, part| sofar + send("length_for_#{part}") }; end
+  
+  # get them all
+  def offsets
+    sofar = 0
+    ([0] + parts.map { |part| sofar += self.send("length_for_#{part}") })
   end
   
   # returns a hash version of this DataBrick
@@ -109,20 +118,25 @@ class DataBrick
   
   # returns a stringy representation of this DataBrick's unique content
   def inspect
-    "<#{self.class.name}##{position}: #{parts.map {|p|
-        val = self.send(p); ".#{p}: #{val.is_a?(DataBrick) ? val.micro_inspect : val.inspect}"
-    }.join(', ')}>"
+    "[#{self.class.name}+#{position}: #{parts.map {|p|
+        val = self.send(p); ".#{p}: #{val.respond_to?(:micro_inspect) ? val.micro_inspect : val.inspect}"
+    }.join(', ')}]"
   end
   
-  def micro_inspect; "<#{self.class.name}##{position}>"; end
+  def micro_inspect; "[#{self.class.name}+#{position}]"; end
+  
+  # If loaded via a :pointer, this lets you get back to the parent, or set that pointer to some other thing
+  def parent; @parent; end
+  def parents_child= value; @parental_setter.call(value); end
   
   protected
+  def set_parent_accessors(parent, &set); @parent = parent; @parental_setter = set; self end
   def parts; self.class.instance_variable_get(:@parts); end
   PointerDefaults = {:bits => 32, :nil_if => 0xFFFFFFFF}
   
   # defines a simple string - defaults 8 bit length, :bits => 16 or 32 for longer strings!
   def self.define_one_string(name, opts)
-    define_piece "#{name}_length", :string_length, {:string_name => name}.merge(opts)
+    define_piece "#{name}_length", :string_length, {:string_name => name}.merge(opts) unless opts[:length] || opts[:length_from]
     define_piece name,             :raw_string,    {:length_from => "#{name}_length".to_sym}.merge(opts)
   end
   
@@ -137,14 +151,18 @@ class DataBrick
     source.read(options[:bits] / 8).unpack(IntPacker[options[:bits]]).first
   end
   
-  def read_raw_string(io, options); io.read(options[:length] || send(options[:length_from])); end
+  def read_raw_string(io, options); io.read(options[:length] || send(options[:length_from])).freeze; end
   alias_method :read_string_length, :read_integer
   
   def read_pointer(io, options)
     options = PointerDefaults.merge(options)
+    pos = io.tell
     ref = read_integer(io, options)
     return nil if ref == options[:nil_if]
-    (options[:type] || self.class).new(io, ref)
+    obj = (options[:type] || self.class).new(io, ref)
+    obj.send(:set_parent_accessors, self) do |value|
+      w = io.tell; io.seek pos; io.write self.blob_pointer(value, {}, options); io.seek w
+    end
   end
   
   def read_array(io, options)
@@ -157,10 +175,7 @@ class DataBrick
     [int.to_i].pack(IntPacker[options[:bits] || 8])
   end
   
-  def self.blob_raw_string(str, props, options = {})
-    if options[:length] then (str.to_s + ("\000" * options[:length]))[0 ... options[:length]]
-    else str.to_s end
-  end
+  def self.blob_raw_string(str, props, options = {}); str.to_s; end
   
   def self.blob_pointer(pointee, props, options = {})
     options = PointerDefaults.merge(options)
@@ -174,9 +189,9 @@ class DataBrick
   end
   
   def self.blob_array(arr, props, options = {})
-    accumulate = ''; options[:length].times do |i|
-      accumulate += send("blob_#{options[:innards]}", arr[i], props, options[:innards_options]).to_s
-    end; return accumulate
+    arr.inject('') { |result, item|
+      result += send("blob_#{options[:innards]}", item, props, options[:innards_options]).to_s
+    }
   end
   
   # lengths for offset calculation
@@ -195,7 +210,10 @@ class DataBrick::FixedArray
   include Enumerable
   
   # get a part of the array. :)
-  def [] key
+  def [] key, length = nil
+    key = (key.to_i ... key.to_i + length.to_i) if length
+    return key.map { |i| self[i] } if key.is_a?(Range)
+    
     was_at = @io.tell; seek_to key
     return @parent.send("read_#{@options[:innards]}", @io, @options[:innards_options] || {})
   ensure @io.seek was_at end
@@ -213,10 +231,12 @@ class DataBrick::FixedArray
     (0 ... length).each { |index| blk.call(self[index]) }
   end
   
-  def size; @options[:length] || @options[:length_from]; end
+  def size; @options[:length] || @parent.send(@options[:length_from]); end
   alias_method :length, :size
   
-  def inspect; "<#{self.class.name}:#{@start}*#{length}>"; end
+  def inspect; "<#{self.class.name}:#{@start}+#{length}>"; end
+  
+  def to_a; (0...size).map { |i| self[i] }; end
   
   protected
   def seek_to key
@@ -272,6 +292,7 @@ end
 #
 
 #### TODO:
+# !!! Update the raw_string writer to only rewrite stuff _after_ the changed string, and only if it's length actually changed.
 # @ Add float types
 # @ Maybe something for signed numbers?
 # @ Booleans type! (length = bools / 8)

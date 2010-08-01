@@ -32,7 +32,6 @@ until catman == nil
   catman = catman.next
 end
 
-File.unlink('cats.db')
 #### TEST ARRAYS!
 
 class ArrThing < DataBrick

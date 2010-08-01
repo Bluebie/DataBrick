@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = 'databrick'
-  s.version = '0.2.2'
+  s.version = '0.2.4'
   s.require_path = '.'
   s.date = '2010-07-25'
   s.summary = "A tiny binary ORM, to save you from pack and unpack heck!"
